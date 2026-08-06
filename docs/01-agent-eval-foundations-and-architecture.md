@@ -1,116 +1,157 @@
 # Agent 自动化评测指南（上篇）：从传统测开转型、环境硬断言与 Pass^k 架构实战
 
-> **开源项目**：[agent-eval-harness](https://github.com/zhangzhe0309/agent-eval-harness)
+---
+
+## 一、 Agent 使用方案与业务落地场景：Agent 到底在干什么？
+
+在讨论如何评测 Agent 之前，QA 必须首先厘清：**现在的 AI Agent 在企业业务中究竟是如何落地的？它和传统 LLM 聊天工具有何本质不同？**
+
+在企业真实场景中，Agent 已经从单纯的“自然语言对话”演变为**具备自主规划与外部世界修改能力的自动化智能体**：
+
+```
+[用户 Prompt/业务事件] ──> [LLM 思考规划 Thought] ──> [选择并调用工具 Action] ──> [环境返回结果 Observation]
+        ▲                                                                           │
+        └──────────────────────────── (循环直至目标完成) ────────────────────────────┘
+```
+
+### 常见的 4 类 Agent 落地方案与能力边界：
+
+1. **SQL 与数据库变更 Agent**：
+   - **能做的事**：接收用户自然语言需求（如“帮助整理上周逾期 7 天的用户并冻结账号”），生成 SQL、校验权限、直接连入数据库执行 Write/Update 操作。
+2. **自动化运维与 DevOps Agent**：
+   - **能做的事**：监听到线上 CPU 告警，自动登录 Linux VPS、读取日志、定位异常进程并执行重启或 Pod 扩容。
+3. **电商与客服退换货 Agent**：
+   - **能做的事**：自动查询订单 API、比对物流状态、调用支付接口发起退款并向用户发送通知邮件。
+4. **代码修复与工程 Agent**：
+   - **能做的事**：读取 Git Issue，在本地沙箱中克隆代码、定位 Bug、修改文件、运行单测并提交 PR。
 
 ---
 
-## 一、 引言：为什么传统自动化测试范式在 Agent 时代彻底失效？
+## 二、 传统 QA 进场后的“四大噩梦”：为什么传统测试直接翻车？
 
-在过去的十余年中，传统软件测试（接口自动化、UI 自动化、E2E 流程测试）建立在**确定性（Determinism）**的基础之上：
+当传统测开工程师拿接口测试（pytest/Postman）或 UI 自动化（Playwright/Selenium）的经验去测 Agent 时，会立刻陷入以下四大噩梦：
 
-$$\text{Input (固定参数 / 步骤)} \longrightarrow \text{System Under Test} \longrightarrow \text{Output (确定的 Response / DOM)} $$
+### 噩梦一：“嘴上说成功，暗地里没动”（幻觉与欺骗）
+- **现象**：Agent 输出了完美自然语言：“我已经成功帮您清空了过期用户的数据”。但 QA 连入数据库一查，数据原封不动，后台日志显示 Agent 在第二步调用 Tool API 时就已经抛出了 HTTP 500 错误。
+- **痛点**：传统测试断言 `assert "成功" in response.text` 彻底失效。
 
-但在 AI Agent 时代，测试对象拥有了自主规划与多步工具调用的能力，带来了三大颠覆性挑战：
+### 噩梦二：“过程弯弯绕，每次都不一样”（非确定性执行）
+- **现象**：测试同一个“修改订单”功能，第一次跑 Agent 调了 2 个 Tool 直接完成；第二次跑 Agent 在工具选择上绕了弯路，调用了 5 次 Tool 并在中间重试了 2 次；第三次跑 Agent 甚至选了完全不同的 API 组合。
+- **痛点**：传统测试固定的 `Step 1 -> Step 2 -> Step 3` 硬编码断言路线完全崩溃。
 
-1. **过程非确定性（Non-Deterministic Execution）**：给定相同的高层 Prompt，Agent 每次执行选择的工具链、思考路线甚至重试路径都可能完全不同。
-2. **文本吐出 ≠ 任务完成（Text Generation ≠ Task Accomplishment）**：大模型生成一段形如“已经成功更新了订单状态”的回复，并不意味着其背后真正发起了 API 调用或数据库 Write 操作（即所谓的“幻觉欺骗”）。
-3. **无单一标准答案**：Agent 可以有多种合法的探索路径，任何试图匹配固定文本或硬编码步骤的传统断言都会导致大量误报。
+### 噩梦三：“目标达到了，副作用毁所有”（隐蔽破坏力）
+- **现象**：Agent 成功将订单 `#10086` 的状态修改为了 `SHIPPED`，但因为生成的 SQL 语句少写了一个 `WHERE` 条件前缀，导致同表前 500 条记录的状态都被误刷成了 `SHIPPED`。
+- **痛点**：传统测试只校验目标字段，忽略了对外部环境整体“副作用”的防护。
 
----
-
-## 二、 范式转变：基于环境终态的可执行断言 (Execution-based Assertions)
-
-为了解决上述问题，评测范式必须完成从**“校验输出文本（Text-Matching）”**到**“校验物理环境终态（Execution-based State Check）”**的根本性转变。
-
-```
-[Agent 收到 Prompt] ──> [自主规划与工具调用] ──> [修改外部物理环境 (数据库/文件/API)]
-                                                          │
-                                                          ▼
-                                            [测试探针直接检查物理环境终态]
-```
-
-### 1. 三大高级环境断言体系
-
-- **物理状态硬断言 (Physical State Assertion)**：
-  - 不看 Agent 说了什么，直接由测试探针连入真实的 PostgreSQL、Redis 或 Linux 文件系统，检查目标记录是否发生真实变更。
-- **状态机迁移断言 (State Machine Transition Assertion)**：
-  - 检查 Agent 的操作是否符合业务合法状态机。例如：订单状态只能由 `PENDING` $\rightarrow$ `PROCESSING` $\rightarrow$ `SHIPPED`，若 Agent 绕过中间态强行修改，断言应立刻拦截。
-- **副作用隔离断言 (Side-effect Isolation Assertion)**：
-  - 校验“非目标资源是否被误伤”。检查目标订单更新的同时，校验同表其他记录未被误删除。
-
-### 2. 沙箱隔离机制
-
-由于 Agent 具备真实的物理环境破坏力，所有的测试用例必须运行在完全隔离且可自动复原的**沙箱基础设施（Sandbox Infrastructure）**中：
-- **Setup 阶段**：测试前自动回滚数据库事务、恢复 Docker 镜像快照或清空 Mock 状态。
-- **Teardown 阶段**：测试完成后强制销毁中间生成的临时文件、闭合 HTTP 连接。
+### 噩梦四：“单次跑通不代表上线安全”（概率成功假象）
+- **现象**：QA 在本地手动运行了一次测试，Agent 顺利完成了任务，于是批准上线。上线后在生产环境面对真实流量，失败率高达 30%。
+- **痛点**：LLM 采样温度（Temperature > 0）导致单次测试成功仅仅是偶然“打中了成功概率分支”。
 
 ---
 
-## 三、 评测框架分层架构设计与 $Pass^k$ 数学模型
+## 三、 代码与算法为了解决什么问题？
 
-`agent-eval-harness` 采用模块化、低耦合的分层架构设计：
+正是为了解决上述四大噩梦，我们才必须设计**针对 Agent 特性的测试代码框架与 $Pass^k$ 数学算法**。
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Agent Evaluator (评测引擎)                      │
-├────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐     ┌───────────────────┐     ┌──────────────────┐  │
-│  │ Task Dataset │ ──> │ Sandbox Lifecycle │ ──> │ Agent Under Test │  │
-│  └──────────────┘     └───────────────────┘     └───────────────────┘  │
-│                                                          │             │
-│                                                          ▼             │
-│  ┌──────────────┐     ┌───────────────────┐     ┌──────────────────┐  │
-│  │ Pass^k Stats │ <── │  Graders Engine   │ <── │ Transcript Trace │  │
-│  └──────────────┘     └───────────────────┘     └──────────────────┘  │
-└────────────────────────────────────────────────────────────────────────┘
+【噩梦一 & 噩梦三】 ──────> 【解法一：基于物理环境的硬断言与沙箱机制 (Execution-based & Sandbox)】
+【噩梦二 & 噩梦四】 ──────> 【解法二：解决非确定性的 Pass^k 数学模型 (Reliability Evaluation)】
 ```
 
-### 1. 应对非确定性：$Pass^k$ 与 $Pass@k$ 可靠性模型
+---
 
-由于大模型 Sampling 温度（Temperature > 0）及环境调用的随机性，**Agent 跑通一次测试用例没有任何统计学意义**。框架引入了多轮 Trial 统计模型：
+## 四、 解法一：编写可执行的环境硬断言与沙箱机制
 
-- **$Pass^k$ (All-Pass Reliability Metric)**：
-  针对同一个测试任务 $T$，独立重置环境并连续运行 $k$ 次 Trial。只有当 $k$ 次试验**全部通过**时，$Pass^k$ 才判定为 `True`。
-  $$Pass^k = \prod_{i=1}^{k} \mathbb{I}(\text{Trial}_i = \text{SUCCESS})$$
-  适用于金融、数据库运维、医疗心理辅导等高可靠要求场景。
-- **$Pass@k$ (Any-Pass Capability Metric)**：
-  在 $k$ 次独立的 Trial 中，只要有**至少 1 次**成功完成任务即判定为 `True`。适用于代码生成与创意设计等探索性场景。
+为了解决**噩梦一（幻觉欺骗）**与**噩梦三（副作用破坏）**，测试框架摒弃了文本比对，引入了三类硬断言：
+
+1. **物理状态硬断言 (Physical State Assertion)**：
+   - 不看 Agent 说了什么，由测试探针直接连入真实数据库或文件系统，校验数据记录。
+2. **状态机迁移断言 (State Machine Transition Assertion)**：
+   - 校验 Agent 的操作是否符合业务合法状态机（如 `PENDING` $\rightarrow$ `PROCESSING` $\rightarrow$ `SHIPPED`），防止越级非法修改。
+3. **副作用隔离断言 (Side-effect Isolation Assertion)**：
+   - 检查目标记录变更的同时，校验同表非目标记录未被误删除或误修改。
+
+### 沙箱隔离机制 (Sandbox Lifecycle)
+每次测试运行在独立的沙箱中：
+- **Setup 阶段**：测试前回滚 DB 事务、重置 Mock 状态，确保干净起跑线。
+- **Teardown 阶段**：测试后强制销毁垃圾数据与连接，防止用例污染。
+
+---
+
+## 五、 解法二：代码框架设计与 $Pass^k$ 数学算法
+
+为了解决**噩梦二（过程弯弯绕）**与**噩梦四（概率成功假象）**，我们必须引入 $Pass^k$ 统计学模型。
+
+### 1. $Pass^k$ 算法数学原理
+
+单次测试通过没有意义。在独立沙箱中将同一个任务连续运行 $k$ 次 Trial，只有当 $k$ 次试验**全部成功**时，$Pass^k$ 才判定为 `True`：
+
+$$Pass^k = \prod_{i=1}^{k} \mathbb{I}(\text{Trial}_i = \text{SUCCESS})$$
+
+- 若单次成功率为 $70\%$，在 $k=5$ 时：
+  $$Pass^5 = 0.7^5 \approx 16.8\%$$
+  真实的系统不稳定风险会被指数级放大并暴露出来！
 
 ### 2. CI/CD 四级 Ship Gate 发布门禁
 
 ```
-[PR 提交] ─> [L1 Syntax Gate] ─> [L2 Sanity Gate] ─> [L3 Reliability Gate] ─> [L4 Efficiency Gate] ─> [准予发布]
+[PR 提交] ─> [L1 Syntax Gate] ─> [L2 Sanity Gate] ─> [L3 Reliability Pass^5 Gate] ─> [L4 Efficiency Gate] ─> [发布]
 ```
 
-1. **L1 Syntax Gate**：静态校验 Prompt 模板与 Tool JSON Schema 定义。耗时 < 5s。
-2. **L2 Sanity Gate**：20 个核心 Task 单次冒烟（$k=1$）。拦截严重接口中断。耗时 < 2min。
+1. **L1 Syntax Gate**：静态校验 Prompt 模板与 Tool JSON Schema 定义。
+2. **L2 Sanity Gate**：20 个核心 Task 单次冒烟（$k=1$）。
 3. **L3 Reliability Gate**：100+ Task 集合独立运行 $k=5$ 轮，要求总体 $Pass^5 > 85\%$。
-4. **L4 Efficiency Gate**：校验平均调用步数、工具报错率及 Token 消耗，拦截性能死循环退化。
+4. **L4 Efficiency Gate**：校验平均步数与工具报错率，拦截耗时死循环退化。
 
 ---
 
-## 四、 快速上手代码实战
+## 六、 评测框架 Python 实战
+
+`agent-eval-harness` 框架如何通过代码落地上述解法：
 
 ```python
 from agent_eval import Task, SandboxEnvironment, CodeGrader, AgentEvaluator, Step, Transcript
 
-# 1. 定义任务
-task = Task(id="task_001", name="废弃记录清理", prompt="清理 EXPIRED 记录", expected_state={"expired_count": 0})
+# 1. 定义测试 Task (针对 SQL 变更场景)
+task = Task(
+    id="task_sql_clean",
+    name="过期用户冻结任务",
+    prompt="请冻结 status 为 EXPIRED 的用户账号",
+    expected_state={"expired_active_count": 0, "normal_active_count": 100}
+)
 
-# 2. 配置沙箱
-db_mock = {"expired_count": 15, "active_count": 100}
-sandbox = SandboxEnvironment(setup_fn=lambda: dict(db_mock), get_state_fn=lambda: dict(db_mock))
+# 2. 配置沙箱钩子 (防止用例污染)
+db_mock = {}
 
-# 3. 编写环境硬断言
-def assert_db_clean(task, transcript, env_state):
-    if env_state.get("expired_count") != 0:
-        return False, "物理硬断言失败: 过期记录未清理"
-    return True, "断言完全通过"
+def setup_db():
+    db_mock["expired_active_count"] = 15  # 待清理记录
+    db_mock["normal_active_count"] = 100   # 正常记录 (保护对象)
+    return dict(db_mock)
 
-# 4. 执行 Pass^5 可靠性评估
-evaluator = AgentEvaluator(grader=CodeGrader(check_fn=assert_db_clean), env=sandbox)
-summary = evaluator.evaluate_task(task, my_mock_agent, k=5)
+sandbox = SandboxEnvironment(
+    setup_fn=setup_db,
+    teardown_fn=lambda state: db_mock.clear(),
+    get_state_fn=lambda: dict(db_mock)
+)
 
-print(f"Pass^5 全成功: {summary.pass_all}")
-print(f"成功率: {summary.success_rate * 100}%")
+# 3. 编写 QA 硬断言 (解决噩梦一与噩梦三)
+def qa_hard_assert(task, transcript, env_state):
+    # 硬断言 1: 目标数据必须变更
+    if env_state.get("expired_active_count") != 0:
+        return False, "物理断言失败: 过期账号未被冻结"
+    
+    # 硬断言 2: 副作用隔离 (正常数据不能被误修改)
+    if env_state.get("normal_active_count") != 100:
+        return False, "副作用断言失败: 正常用户账号被误修改"
+        
+    return True, "物理硬断言与副作用校验完全通过"
+
+# 4. 执行 Pass^5 可靠性统计评估 (解决噩梦二与噩梦四)
+evaluator = AgentEvaluator(grader=CodeGrader(check_fn=qa_hard_assert), env=sandbox)
+summary = evaluator.evaluate_task(task, my_agent_runner, k=5)
+
+print(f"Task ID: {summary.task_id}")
+print(f"Pass^5 全成功率: {summary.pass_all}")
+print(f"单次平均成功率: {summary.success_rate * 100}%")
+print(f"平均消耗步数: {summary.avg_steps}")
 ```
