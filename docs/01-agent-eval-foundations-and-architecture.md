@@ -53,25 +53,23 @@
 
 正因为 Agent 系统存在上述四大固有失效模式，传统接口测试（Postman/pytest 接口断言）与 UI 测试（Playwright DOM 校验）才会在 Agent 测试中全面失效。
 
-针对 Agent 的固有缺陷，必须引入全新的**代码断言框架与 $Pass^k$ 统计算法**：
+针对 Agent 的固有缺陷，`agent-eval-harness` 引入了**多维组合判定器 (CompositeGrader) 与 $Pass^k$ 统计算法**：
 
 ```
-【失效模式一 & 失效模式三】 ──────> 【解法一：基于物理环境的硬断言与沙箱机制 (Execution-based & Sandbox)】
-【失效模式二 & 失效模式四】 ──────> 【解法二：解决非确定性的 Pass^k 数学模型 (Reliability Evaluation)】
+【失效模式一 & 失效模式三】 ──────> 【解法一：物理环境终态校验 (StateGrader) + 工具链参数断言 (ToolCorrectnessGrader)】
+【失效模式二 & 失效模式四】 ──────> 【解法二：步骤效率/死循环阻断 (StepEfficiencyGrader) + Pass^k 可靠性模型】
 ```
 
 ---
 
-## 四、 解法一：编写可执行的环境硬断言与沙箱机制
+## 四、 解法一：多维判定体系 (Grader Matrix) 与沙箱隔离
 
-为了解决**失效模式一（幻觉欺骗）**与**失效模式三（副作用破坏）**，测试框架摒弃了文本比对，引入了三类硬断言：
+为了解决**失效模式一（幻觉欺骗）**与**失效模式三（副作用破坏）**，评测框架提供了四大断言组件：
 
-1. **物理状态硬断言 (Physical State Assertion)**：
-   - 不看 Agent 说了什么，由测试探针直接连入真实数据库或文件系统，校验数据记录。
-2. **状态机迁移断言 (State Machine Transition Assertion)**：
-   - 校验 Agent 的操作是否符合业务合法状态机（如 `PENDING` $\rightarrow$ `PROCESSING` $\rightarrow$ `SHIPPED`），防止越级非法修改。
-3. **副作用隔离断言 (Side-effect Isolation Assertion)**：
-   - 检查目标记录变更的同时，校验同表非目标记录未被误删除或误修改。
+1. **状态断言 (StateGrader)**：测试探针连入物理存储（数据库/文件），校验数据变更与副作用隔离。
+2. **工具正确性断言 (ToolCorrectnessGrader)**：校验 Agent 调用的工具序列是否包含必需工具，且参数 JSON 格式与逻辑正确。
+3. **效率与死循环断言 (StepEfficiencyGrader)**：校验总步数是否超出上限，自动识别连续重复调用的死循环逻辑。
+4. **组合判定器 (CompositeGrader)**：支持多维度 Grader 加权融合打分（如 50% 物理状态 + 30% 工具正确性 + 20% 步骤效率）。
 
 ### 沙箱隔离机制 (Sandbox Lifecycle)
 每次测试运行在独立的沙箱中：
@@ -80,7 +78,7 @@
 
 ---
 
-## 五、 解法二：代码框架设计与 $Pass^k$ 数学算法
+## 五、 解法二：$Pass^k$ 数学算法与 CI/CD 门禁
 
 为了解决**失效模式二（过程弯弯绕）**与**失效模式四（概率成功假象）**，我们必须引入 $Pass^k$ 统计学模型。
 
@@ -107,53 +105,53 @@ $$Pass^k = \prod_{i=1}^{k} \mathbb{I}(\text{Trial}_i = \text{SUCCESS})$$
 
 ---
 
-## 六、 评测框架 Python 实战
+## 六、 工业级 Python 评测代码实战
 
-`agent-eval-harness` 框架如何通过代码落地上述解法：
+`agent-eval-harness` 框架如何通过组合判定器与沙箱进行测试：
 
 ```python
-from agent_eval import Task, SandboxEnvironment, CodeGrader, AgentEvaluator, Step, Transcript
-
-# 1. 定义测试 Task (针对 SQL 变更场景)
-task = Task(
-    id="task_sql_clean",
-    name="过期用户冻结任务",
-    prompt="请冻结 status 为 EXPIRED 的用户账号",
-    expected_state={"expired_active_count": 0, "normal_active_count": 100}
+from agent_eval import (
+    Task, SandboxEnvironment, CompositeGrader, StateGrader,
+    ToolCorrectnessGrader, StepEfficiencyGrader, AgentEvaluator,
+    Step, ToolCall, Transcript
 )
 
-# 2. 配置沙箱钩子 (防止用例污染)
-db_mock = {}
+# 1. 定义测试 Task
+task = Task(
+    id="task_order_ship",
+    name="订单发货处理",
+    prompt="请处理订单 10086 的发货并发送通知",
+    expected_state={"order_10086_status": "shipped", "email_sent": True},
+    expected_tools=["query_order", "update_order", "send_email"],
+    max_allowed_steps=5
+)
 
-def setup_db():
-    db_mock["expired_active_count"] = 15  # 待清理记录
-    db_mock["normal_active_count"] = 100   # 正常记录 (保护对象)
+# 2. 配置测试沙箱
+db_mock = {}
+def setup_env():
+    db_mock.clear()
+    db_mock["order_10086_status"] = "pending"
+    db_mock["email_sent"] = False
     return dict(db_mock)
 
-sandbox = SandboxEnvironment(
-    setup_fn=setup_db,
-    teardown_fn=lambda state: db_mock.clear(),
-    get_state_fn=lambda: dict(db_mock)
+sandbox = SandboxEnvironment(setup_fn=setup_env, get_state_fn=lambda: dict(db_mock))
+
+# 3. 构造 CompositeGrader 加权组合断言
+composite_grader = CompositeGrader(
+    graders=[
+        (StateGrader(), 0.5),                                                         # 50% 权重：物理状态断言
+        (ToolCorrectnessGrader(expected_tools=["query_order", "update_order"]), 0.3),  # 30% 权重：工具序列与参数断言
+        (StepEfficiencyGrader(max_steps=5), 0.2)                                      # 20% 权重：步骤效率与死循环熔断
+    ]
 )
 
-# 3. 编写 QA 硬断言 (解决失效模式一与失效模式三)
-def qa_hard_assert(task, transcript, env_state):
-    # 硬断言 1: 目标数据必须变更
-    if env_state.get("expired_active_count") != 0:
-        return False, "物理断言失败: 过期账号未被冻结"
-    
-    # 硬断言 2: 副作用隔离 (正常数据不能被误修改)
-    if env_state.get("normal_active_count") != 100:
-        return False, "副作用断言失败: 正常用户账号被误修改"
-        
-    return True, "物理硬断言与副作用校验完全通过"
-
-# 4. 执行 Pass^5 可靠性统计评估 (解决失效模式二与失效模式四)
-evaluator = AgentEvaluator(grader=CodeGrader(check_fn=qa_hard_assert), env=sandbox)
+# 4. 执行 Pass^5 可靠性统计评估
+evaluator = AgentEvaluator(grader=composite_grader, env=sandbox)
 summary = evaluator.evaluate_task(task, my_agent_runner, k=5)
 
 print(f"Task ID: {summary.task_id}")
 print(f"Pass^5 全成功率: {summary.pass_all}")
 print(f"单次平均成功率: {summary.success_rate * 100}%")
+print(f"综合平均得分: {summary.avg_score}")
 print(f"平均消耗步数: {summary.avg_steps}")
 ```

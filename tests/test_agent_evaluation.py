@@ -1,41 +1,45 @@
 import random
+from agent_eval.dataset import BenchmarkDataset
 from agent_eval.evaluator import AgentEvaluator
-from agent_eval.graders import CodeGrader, StateGrader
-from agent_eval.models import Step, Task, Transcript
+from agent_eval.graders import (
+    CodeGrader,
+    CompositeGrader,
+    StateGrader,
+    StepEfficiencyGrader,
+    ToolCorrectnessGrader,
+)
+from agent_eval.models import Step, Task, ToolCall, Transcript
 
 
 def mock_successful_agent(task: Task, env) -> Transcript:
-    """模拟成功的 Agent 行为链条"""
+    """模拟成功、调工具正确、高效的 Agent 行为链条"""
     transcript = Transcript()
-    # 步骤 1: 思考并调用查询接口
+    # Step 1: 查询
     transcript.steps.append(
         Step(
             step_number=1,
             thought="需要先查询订单 10086 的当前状态",
-            action="query_order",
-            action_input={"order_id": "10086"},
+            tool_calls=[ToolCall(tool_name="query_order", arguments={"order_id": "10086"}, output={"status": "pending"})],
             observation={"status": "pending"},
         )
     )
-    # 步骤 2: 修改订单状态
+    # Step 2: 改变物理状态
     env._current_state["order_10086_status"] = "shipped"
     transcript.steps.append(
         Step(
             step_number=2,
-            thought="订单状态为 pending，调用 update_order 接口修改为 shipped",
-            action="update_order",
-            action_input={"order_id": "10086", "status": "shipped"},
+            thought="修改订单状态为 shipped",
+            tool_calls=[ToolCall(tool_name="update_order", arguments={"order_id": "10086", "status": "shipped"}, output={"success": True})],
             observation={"success": True},
         )
     )
-    # 步骤 3: 发送通知邮件
+    # Step 3: 发送邮件
     env._current_state["email_sent"] = True
     transcript.steps.append(
         Step(
             step_number=3,
-            thought="订单更新成功，发送确认邮件",
-            action="send_email",
-            action_input={"to": "user@example.com", "subject": "Shipped"},
+            thought="发送发货确认邮件",
+            tool_calls=[ToolCall(tool_name="send_email", arguments={"to": "user@example.com", "subject": "Shipped"}, output={"sent": True})],
             observation={"sent": True},
         )
     )
@@ -43,36 +47,46 @@ def mock_successful_agent(task: Task, env) -> Transcript:
 
 
 def mock_flaky_agent(task: Task, env) -> Transcript:
-    """模拟概率性失败的 Agent（模拟随机性）"""
+    """模拟概率性失败的 Agent"""
     transcript = Transcript()
-    if random.random() > 0.3:  # 70% 概率成功
+    if random.random() > 0.3:  # 70% 成功率
         env._current_state["order_10086_status"] = "shipped"
         env._current_state["email_sent"] = True
-        transcript.steps.append(Step(step_number=1, action="update_order"))
-    else:  # 30% 概率出错并遗漏步骤
+        transcript.steps.append(
+            Step(step_number=1, tool_calls=[ToolCall(tool_name="update_order", arguments={"order_id": "10086"})])
+        )
+    else:  # 30% 失败率
         env._current_state["order_10086_status"] = "pending"
-        transcript.steps.append(Step(step_number=1, action="update_order", is_error=True))
+        transcript.steps.append(
+            Step(step_number=1, is_error=True, tool_calls=[ToolCall(tool_name="update_order", is_error=True)])
+        )
     return transcript
 
 
-def test_state_grader_success(mock_task, memory_sandbox):
-    """测试基于环境终态校验的 StateGrader（单次通过）"""
-    grader = StateGrader()
-    evaluator = AgentEvaluator(grader=grader, env=memory_sandbox)
+def test_composite_grader_and_evaluator(mock_task, memory_sandbox):
+    """测试加权组合判定器与评测引擎"""
+    composite = CompositeGrader(
+        graders=[
+            (StateGrader(), 0.5),
+            (ToolCorrectnessGrader(expected_tools=["query_order", "update_order"]), 0.3),
+            (StepEfficiencyGrader(max_steps=5), 0.2),
+        ]
+    )
 
+    evaluator = AgentEvaluator(grader=composite, env=memory_sandbox)
     trial = evaluator.run_trial(mock_task, mock_successful_agent)
+
     assert trial.passed is True
-    assert trial.score == 1.0
+    assert trial.score > 0.8
     assert trial.transcript.total_steps == 3
     assert trial.transcript.error_count == 0
 
 
-def test_pass_k_reliability_evaluation(mock_task, memory_sandbox):
-    """测试多轮 Trial (Pass^k vs Pass@k) 可靠性度量"""
+def test_pass_k_statistical_evaluation(mock_task, memory_sandbox):
+    """测试多轮 Pass^k 与 Pass@k 可靠性计算模型"""
     grader = StateGrader()
     evaluator = AgentEvaluator(grader=grader, env=memory_sandbox)
 
-    # 固定随机种子测试概率 agent
     random.seed(42)
     summary = evaluator.evaluate_task(mock_task, mock_flaky_agent, k=5)
 
@@ -80,21 +94,35 @@ def test_pass_k_reliability_evaluation(mock_task, memory_sandbox):
     assert isinstance(summary.pass_all, bool)
     assert isinstance(summary.pass_any, bool)
     assert 0.0 <= summary.success_rate <= 1.0
+    assert summary.avg_steps > 0
 
 
-def test_code_grader_custom_assertion(mock_task, memory_sandbox):
-    """测试基于自定义 Python 逻辑的 CodeGrader"""
+def test_step_efficiency_loop_detection(mock_task, memory_sandbox):
+    """测试死循环（重复调用相同工具参数）检测能力"""
+    def looping_agent(task, env):
+        transcript = Transcript()
+        for i in range(4):  # 连续重复调用 4 次
+            transcript.steps.append(
+                Step(step_number=i+1, tool_calls=[ToolCall(tool_name="retry_api", arguments={"param": "1"})])
+            )
+        return transcript
 
-    def custom_check(task, transcript, env_state):
-        if env_state.get("email_sent") is not True:
-            return False, "Email notification was not dispatched"
-        if transcript.total_steps > 5:
-            return False, "Agent used too many unnecessary steps"
-        return True, "All requirements met"
-
-    grader = CodeGrader(check_fn=custom_check)
+    grader = StepEfficiencyGrader()
     evaluator = AgentEvaluator(grader=grader, env=memory_sandbox)
 
-    trial = evaluator.run_trial(mock_task, mock_successful_agent)
-    assert trial.passed is True
-    assert "All requirements met" in trial.reason
+    trial = evaluator.run_trial(mock_task, looping_agent)
+    assert trial.passed is False
+    assert "infinite retry loop" in trial.reasons[0]
+
+
+def test_benchmark_dataset_loader(tmp_path):
+    """测试 Task 测试集 JSON 加载"""
+    dataset_file = tmp_path / "test_benchmark.json"
+    dataset_file.write_text(
+        '[{"id": "t1", "name": "Task 1", "prompt": "Prompt 1", "metadata": {"category": "devops"}}]'
+    )
+
+    dataset = BenchmarkDataset.from_json_file(str(dataset_file))
+    assert len(dataset) == 1
+    assert dataset[0].id == "t1"
+    assert len(dataset.filter_by_metadata("category", "devops")) == 1
