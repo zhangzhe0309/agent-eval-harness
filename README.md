@@ -13,8 +13,8 @@
 
 1. 📖 **[Agent 自动化评测指南（上篇）：从传统测开转型、环境硬断言与 Pass^k 架构实战](docs/01-agent-eval-foundations-and-architecture.md)**
    - 分析 Agent 业务落地方案与能力边界，剖析 QA 进场后的“四大噩梦”（幻觉欺骗、非确定性、副作用破坏与概率成功假象），详解从“物理硬断言/沙箱隔离”到“Pass^k 数学模型/CI 四级 Ship Gate”的完整解法与 Python 代码实战。
-2. 📖 **[Agent 自动化评测��南（下篇）：执行轨迹（Transcript）解析、LLM Judge 数学校准与生产飞轮](docs/02-transcript-analysis-llm-judge-and-production.md)**
-   - Outcome 盲区与风险揭秘、Thought-Action-Observation 轨迹解析、LLM Judge Cohen's Kappa 数学打分校准（$K \ge 0.75$）与线上生产闭环飞轮。
+2. 📖 **[Agent 自动化评测指南（下篇）：执行轨迹（Transcript）解析、LLM Judge 数学校准与生产飞轮](docs/02-transcript-analysis-llm-judge-and-production.md)**
+   - 结合研发与测试视角剖析黑盒测试的三大异常事故（Reward Hacking、死循环 Token 暴爆、暗度陈仓副作用），详解 Transcript 结构化解析与三大过程指标、LLM Judge Cohen's Kappa 数学校准（K ≥ 0.75）与生产飞轮闭环。
 
 ## 目录结构
 

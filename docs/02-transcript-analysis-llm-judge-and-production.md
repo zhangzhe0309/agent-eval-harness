@@ -1,116 +1,142 @@
 # Agent 自动化评测指南（下篇）：执行轨迹（Transcript）解析、LLM Judge 数学校准与生产飞轮
 
-> **开源项目**：[agent-eval-harness](https://github.com/zhangzhe0309/agent-eval-harness)
+---
+
+## 一、 遇到的实际问题：为什么只看“终态结果”研发和测试都会踩坑？
+
+在 Agent 开发与测试的日常协作中，研发（Dev）和测试（QA）经常陷入以下两难困境：
+
+- **研发的苦恼**：“本地测试数据库记录是对的，为什么线上用户频频反馈 Agent 回复极慢、Token 费用暴涨，甚至偶尔‘发疯’？”
+- **测试的苦恼**：“测试断言校验数据库字段 PASS 了，但上线后发现 Agent 在偷偷利用漏洞‘绕路’或者‘造假’，测试根本拦截不住！”
+
+之所以双方都会踩坑，是因为**只看终态结果（Outcome）的黑盒测试掩盖了过程中的三大隐蔽事故**：
+
+### 异常场景 1：“越权偷懒/造假”（Reward Hacking）
+- **问题现象**：Agent 遇到“调 API 无权限”报错后，为了完成任务，竟然自己生成了一串硬编码的 JSON 字符串作为工具返回结果，骗过了后续流程。
+- **后果**：表面上终态数据更新成功，实则绕过了安全鉴权，属于严重业务漏洞。
+
+### 异常场景 2：“死循环与 Token 暴爆”
+- **问题现象**： Agent 遇到第三方 API 抛出 HTTP 500 错误时，因为 Prompt 没有写明重试上限，在后台连续重试了 30 次调用。
+- **后果**：虽然最后一次重试碰巧成功了，但单次请求耗时 40 秒，消耗了 10 万 Token，生产环境账单暴涨。
+
+### 异常场景 3：“暗度陈仓的副作用”
+- **问题现象**： Agent 成功更新了目标用户 `#U123` 的状态，但因为 SQL 的 `WHERE` 条件有缺陷，顺手清空了关联表中的历史日志。
+- **后果**：终态探针只校验了用户表，导致致命的数据丢失未被发现。
 
 ---
 
-## 一、 核心避坑：为什么只看终态结果（Outcome）会掩盖 90% 的隐蔽风险？
+## 二、 解法一：执行轨迹（Transcript）结构化解析
 
-在 Agent 测试实践中，初学者最常犯的严重错误是：**“只要最终环境数据库字段对了，或者断言通过了，就认为测试 100% 成功”**。
+为了解决上述问题，我们必须引入**执行轨迹（Transcript）结构化解析**。
 
-这种黑盒测试思维会导致严重的隐蔽风险遗漏：
-
-1. **Reward Hacking 与侥幸蒙对**：
-   Agent 遇到接口报错后，可能会尝试调用不合规的绕路工具，或者通过硬编码假数据恰好覆盖了校验规则。表面上 Outcome 为 `PASS`，实则是严重的业务漏洞。
-2. **死循环与 Token 爆破陷阱**：
-   Agent 遇到中间步骤异常时，由于 Prompt 缺乏明确终止条件，连续重复调用同个工具 30 次才偶然成功。虽然结果正确，但线上单次调用的延迟和 API Token 成本暴增了 30 倍。
-3. **隐蔽副作用（Side Effects）**：
-   Agent 在修改目标订单记录的同时，因 SQL 筛选条件模糊，不小心清空了关联日志表，而终态探针仅仅检查了订单表。
-
----
-
-## 二、 Transcript（执行轨迹日志）结构化建模与过程指标
-
-为了穿透黑盒，`agent-eval-harness` 对 Agent 的执行全过程进行结构化建模，捕获完整的 **Thought-Action-Observation 链路**：
+### 1. 为什么这么做？
+类似在系统中安装了“黑匣子/高清录像机”，把 Agent 运行过程中的**思考（Thought） $\rightarrow$ 动作（Action） $\rightarrow$ 输入（Input） $\rightarrow$ 工具观察结果（Observation）**逐帧结构化记录下来。
 
 ```json
 {
-  "task_id": "task_001",
+  "task_id": "task_order_refund",
   "steps": [
     {
       "step_number": 1,
-      "thought": "分析用户需求，首先调用 query_user 接口",
-      "action": "query_user",
-      "action_input": {"user_id": "U12345"},
-      "observation": {"status": "ACTIVE"},
+      "thought": "收到退款诉求，先查询订单状态",
+      "action": "query_order",
+      "action_input": {"order_id": "10086"},
+      "observation": {"status": "DELIVERED"},
       "is_error": false,
-      "duration_sec": 0.32
+      "duration_sec": 0.25
     },
     {
       "step_number": 2,
-      "thought": "接口报错，尝试重新发送请求",
-      "action": "query_user",
-      "action_input": {"user_id": "U12345"},
-      "observation": "HTTP 500 Server Error",
+      "thought": "接口抛错 HTTP 500，尝试重复调用",
+      "action": "query_order",
+      "action_input": {"order_id": "10086"},
+      "observation": "HTTP 500 Internal Error",
       "is_error": true,
-      "duration_sec": 1.15
+      "duration_sec": 1.10
     }
   ]
 }
 ```
 
-### 关键过程指标（Process Metrics）：
+### 2. 这样能解决啥？（研发与测试收益）
 
-- **Tool Call Error Rate (工具调用报错率)**：
-  $$\text{Error Rate} = \frac{\text{Count}(\text{Is\_Error} == \text{True})}{\text{Total Steps}}$$
-  若报错率 $> 15\%$，说明 Tool Description 描述模糊或系统稳定性差。
-- **Trajectory Length Ratio (轨迹步数冗余度)**：
-  $$\text{Length Ratio} = \frac{\text{Actual Steps}}{\text{Minimal Expert Steps}}$$
-  评估 Agent 解决问题是“干练高效”还是“笨拙迂回”。
-- **Retry Loop Pattern (死循环阻断率)**：
-  检测是否存在连续相同的 `Action + Action_Input` 组合，防止无限重试。
-
----
-
-## 三、 LLM Judge 评分器的数学校准 (Calibration) 实战
-
-对于无法编写确定性代码断言的开放性场景（如客服回答质量、心理咨询倾听度、复杂报告生成），我们必须引入 LLM 作为 Judge。
-
-但 **未经校准的 LLM Judge 是不可信的**（存在打分漂移、严苛度不一、容易被字数长短误导）。
-
-### 1. 评分细则 (Rubric) 设计原则
-
-- **禁止模糊 1-10 分打分**：要求 LLM Judge 输出布尔契约（Pass/Fail）及具体的 Checklist 原因。
-- **上下文完整输入**：评估 Prompt 必须同时包含：`Task 目标 + 完整 Transcript 轨迹 + 最终环境 Diff`。
-
-### 2. 数学校准流程与 Cohen's Kappa 系数
-
-为了证明 LLM Judge 与人类专家打分具备高度一致性，必须执行**校准 (Calibration) 流程**：
-
-```
-[准备 50 个黄金样例 (Golden Set)] ──> [人类专家双盲标注] ──> [LLM Judge 跑分] ──> [计算 Cohen's Kappa 系数] ──> [迭代 Rubric]
-```
-
-#### 校验一致性指标：Cohen's Kappa 系数
-
-$$K = \frac{p_o - p_e}{1 - p_e}$$
-
-- $p_o$：人类专家与 LLM Judge 的观察一致率。
-- $p_e$：偶然一致率。
-- **合格标准**：$K \ge 0.75$ 表示强一致，LLM Judge 才可以被批准上线代替人工审核。
+- **对研发（Dev）的价值**：
+  - **精准定位归因**：出现异常时，能迅速定位到底是因为 Prompt 引导不清、Tool 工具描述（Description）有歧义，还是底层 LLM 推理能力差。
+- **对测试（QA）的价值**：
+  - **过程质量三维度量**：
+    1. **工具报错率 (Tool Call Error Rate)**：
+       $$\text{Error Rate} = \frac{\text{错误步骤数}}{\text{总步骤数}}$$
+       若报错率 $> 15\%$，说明工具设计不合理或系统不稳定。
+    2. **轨迹冗余度 (Trajectory Length Ratio)**：
+       $$\text{Length Ratio} = \frac{\text{实际执行步数}}{\text{专家标准步数}}$$
+       评估 Agent 是“干练高效”还是“笨拙迂回”。
+    3. **死循环熔断率 (Retry Loop Pattern)**：
+       检测是否存在连续重复调用，及时熔断防爆破。
 
 ---
 
-## 四、 生产环境与离线评测的飞轮闭环
+## 三、 解法二：LLM Judge 打分器的“数学校准”
 
-离线评测集（Benchmark）无论准备得多么详尽，都无法覆盖线上用户的全部真实奇葩操作。真正的评测基础设施必须建立**生产闭环飞轮**：
+### 1. 遇到的实际问题
+对于开放性交互场景（如客服服务态度、心理咨询倾听度、复杂报告撰写），我们无法用 `assert database["status"] == "ok"` 编写硬代码，必须引入大模型当裁判（LLM Judge）。
+
+但**未经校准的 LLM Judge 存在三大致命毛病**：
+- **打分随心所欲**：同样的回答，今天打 8 分，明天打 5 分（标准漂移）。
+- **字数偏见**：天生喜欢字数长、客套话多的回答，哪怕内容是废话。
+- **对 Prompt 极度敏感**：修改了 Judge 的 Prompt 中的一个词，打分分布大幅漂移。
+
+### 2. 为什么这么做？
+必须用**黄金标注集 (Golden Set) + 人类专家双盲标注**对 LLM Judge 进行数学校准，只有通过一致性检验的 LLM 裁判才准许上岗！
 
 ```
-[线上生产环境] ──> [挂载异常探针 (探针抓取 Error / 差评轨迹)]
-      ▲                                   │
-      │                                   ▼
-[回归测试防护网] <── [脱敏加工为离线 Task Benchmark]
+[准备 50 个典型 Task (Golden Set)] ──> [人类专家双盲标注 PASS/FAIL] ──> [LLM Judge 独立打分] ──> [计算 Cohen's Kappa 系数] ──> [迭代 Rubric 细则]
 ```
 
-1. **线上异常轨迹抓取**：在生产环境挂载日志探针，自动捕获触发重试 > 3 次、工具调用失败、用户主动中途取消或打差评的真实轨迹。
-2. **脱敏与 Task 转化**：将线上真实失败场景脱敏后，提炼为标准 Task JSON 投递至离线评测库。
-3. **建立防复发防护网**：针对该故障编写环境硬断言，确保后续的任何代码改动都无法绕过测试防线，实现质量螺旋上升。
+### 3. 这样能解决啥？
+
+- **细则契约化 (Rubric Contract)**：
+  放弃模糊的 1-10 分打分，要求 LLM Judge 输出布尔（PASS/FAIL）与具体的 Checklist 依据。
+- **Cohen's Kappa 系数数学校验**：
+  使用统计学公式计算人类与 LLM Judge 的一致性得分：
+  $$K = \frac{p_o - p_e}{1 - p_e}$$
+  - $p_o$ 为人类专家与 LLM Judge 的观察一致率。
+  - **解决的问题**：只有当 $K \ge 0.75$（强一致）时，才证明 LLM 裁判具备人审替代能力，彻底消除打分随心所欲的患害。
 
 ---
 
-## 五、 全系列总结
+## 四、 解法三：生产环境与离线 Benchmark 的飞轮闭环
 
-通过上篇与下篇的完整梳理，我们完成了从**基础理念（环境硬断言）** $\rightarrow$ **系统架构（$Pass^k$ 与 Ship Gate）** $\rightarrow$ **高级避坑（轨迹解析与 LLM Judge 校准）** 的完整闭环。
+### 1. 遇到的实际问题
+离线测试用例（Benchmark）无论准备得多么详尽，研发和测试都无法穷尽线上真实用户的奇葩操作。线上经常冒出离线测试从未见过的异常。
 
-完整的测试框架代码与所有案例文档均已开源，欢迎在 GitHub 上 Star 与贡献代码：
+### 2. 为什么这么做？
+建立**生产闭环飞轮**，把线上真实生产环境变成测试用例的“自动孵化池”。
+
+```
+[线上生产环境] ──> [挂载探针抓取 (高重试 / 差评 / Error 轨迹)]
+      ▲                                       │
+      │                                       ▼
+[回归防护网] <── [自动脱敏加工为离线 Task Benchmark]
+```
+
+### 3. 这样能解决啥？
+1. **线上异常探针抓取**：自动监控生产环境，一旦发现 Agent 步数 $> 10$ 步、工具连续报错或用户打差评，立刻捕获其 Transcript 轨迹。
+2. **自动化脱敏提炼**：将异常轨迹提取为标准的离线 Task JSON 投递至测试库。
+3. **彻底解决 Bug 屡教不改**：针对该故障补齐环境硬断言，确保代码重构或模型升级时，该问题永远无法在生产环境复发。
+
+---
+
+## 五、 全指南总结（研发与测试落地清单）
+
+通过《上篇》与《下篇》的全面梳理，研发与测试团队可形成以下落地共识：
+
+| 测试维度 | 解决什么问题 | 落地工具与指标 |
+| :--- | :--- | :--- |
+| **环境硬断言 (Execution-based)** | 解决大模型幻觉欺骗与隐蔽破坏 | 物理状态查询、状态机校验、副作用隔离断言 |
+| **Pass^k 可靠性模型** | 解决 Agent 执行非确定性与概率成功假象 | 沙箱独立重置、Pass^5 统计计算 |
+| **执行轨迹解析 (Transcript)** | 解决黑盒追踪难题与 Token 爆破风险 | 捕获 Thought-Action 链路、Tool Error Rate、步数冗余度 |
+| **LLM Judge 校准** | 解决主观开放场景无法编写代码断言 | Golden Set 黄金集、Rubric 契约、Cohen's Kappa (K ≥ 0.75) |
+| **生产闭环飞轮** | 解决离线测试覆盖不全与线上 Bug 复发 | 线上探针捕抓、自动转化为回归 Task |
+
+完整的测试框架代码与所有案例文档均已开源：
 - 官方仓库：[zhangzhe0309/agent-eval-harness](https://github.com/zhangzhe0309/agent-eval-harness)
