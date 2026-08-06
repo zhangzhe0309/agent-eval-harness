@@ -10,6 +10,7 @@ from agent_eval.graders import (
     StateGrader,
     StepEfficiencyGrader,
     ToolCorrectnessGrader,
+    ZeroTrustGrader,
 )
 from agent_eval.models import EvaluationSummary, Step, Task, ToolCall, Transcript, TrialResult
 
@@ -22,6 +23,7 @@ __all__ = [
     "EvaluationSummary",
     "BaseGrader",
     "GraderResult",
+    "ZeroTrustGrader",
     "CodeGrader",
     "StateGrader",
     "ToolCorrectnessGrader",

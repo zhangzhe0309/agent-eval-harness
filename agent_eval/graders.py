@@ -9,6 +9,7 @@ class GraderResult(BaseModel):
     score: float
     reason: str
     name: str = "BaseGrader"
+    is_trusted: bool = True  # 标识是否经过零信任独立验证
 
 
 class BaseGrader(ABC):
@@ -17,8 +18,47 @@ class BaseGrader(ABC):
         pass
 
 
+class ZeroTrustGrader(BaseGrader):
+    """
+    零信任防御性验证 Grader：
+    1. 拒绝盲信 Agent Markdown/Text 自述报告（如"我已修改成功"）；
+    2. 强制通过独立的 TDD 测试探针连入物理环境校验交付物；
+    3. 宁可输出明确的失败报告 (Explicit Failure)，也绝不妥协接受未经校验的口头成功。
+    """
+
+    def __init__(
+        self,
+        tdd_assert_fn: Callable[[Task, Transcript, Any], Tuple[bool, str]],
+        strict_reject_text_claims: bool = True,
+    ):
+        self.tdd_assert_fn = tdd_assert_fn
+        self.strict_reject_text_claims = strict_reject_text_claims
+
+    def evaluate(self, task: Task, transcript: Transcript, env_state: Any) -> GraderResult:
+        # 1. 独立运行 TDD 断言探针 (物理校验)
+        passed, reason = self.tdd_assert_fn(task, transcript, env_state)
+
+        if not passed:
+            # 零信任协议：任何物理探针失败，立刻返回明确的拒绝报告
+            return GraderResult(
+                passed=False,
+                score=0.0,
+                reason=f"[ZeroTrustReject] Independent probe verification failed: {reason}",
+                name="ZeroTrustGrader",
+                is_trusted=True,
+            )
+
+        return GraderResult(
+            passed=True,
+            score=1.0,
+            reason=f"[ZeroTrustVerified] Deliverable passed independent TDD verification: {reason}",
+            name="ZeroTrustGrader",
+            is_trusted=True,
+        )
+
+
 class CodeGrader(BaseGrader):
-    """基���自定义 Python 断言逻辑的判重器"""
+    """基于自定义 Python 断言逻辑的判重器"""
 
     def __init__(self, check_fn: Callable[[Task, Transcript, Any], Tuple[bool, str]]):
         self.check_fn = check_fn
@@ -113,7 +153,6 @@ class LLMJudgeGrader(BaseGrader):
             passed, score, reason = self.judge_fn(task, transcript)
             return GraderResult(passed=passed, score=score, reason=f"[LLM Judge] {reason}", name="LLMJudgeGrader")
 
-        # 默认基于 Rubric 规则与轨迹 Error 校验
         if transcript.error_count == 0:
             return GraderResult(passed=True, score=1.0, reason="[LLM Judge] Agent satisfied rubric without step errors", name="LLMJudgeGrader")
         else:
@@ -124,7 +163,6 @@ class CompositeGrader(BaseGrader):
     """组合判定器：支持多维度 Grader 加权融合判定"""
 
     def __init__(self, graders: List[Tuple[BaseGrader, float]]):
-        """graders: List of (grader_instance, weight)"""
         self.graders = graders
 
     def evaluate(self, task: Task, transcript: Transcript, env_state: Any) -> GraderResult:

@@ -7,6 +7,7 @@ from agent_eval.graders import (
     StateGrader,
     StepEfficiencyGrader,
     ToolCorrectnessGrader,
+    ZeroTrustGrader,
 )
 from agent_eval.models import Step, Task, ToolCall, Transcript
 
@@ -14,16 +15,14 @@ from agent_eval.models import Step, Task, ToolCall, Transcript
 def mock_successful_agent(task: Task, env) -> Transcript:
     """模拟成功、调工具正确、高效的 Agent 行为链条"""
     transcript = Transcript()
-    # Step 1: 查询
     transcript.steps.append(
         Step(
             step_number=1,
-            thought="需要先查询订单 10086 的当前状态",
+            thought="需要先查询���单 10086 的当前状态",
             tool_calls=[ToolCall(tool_name="query_order", arguments={"order_id": "10086"}, output={"status": "pending"})],
             observation={"status": "pending"},
         )
     )
-    # Step 2: 改变物理状态
     env._current_state["order_10086_status"] = "shipped"
     transcript.steps.append(
         Step(
@@ -33,7 +32,6 @@ def mock_successful_agent(task: Task, env) -> Transcript:
             observation={"success": True},
         )
     )
-    # Step 3: 发送邮件
     env._current_state["email_sent"] = True
     transcript.steps.append(
         Step(
@@ -61,6 +59,32 @@ def mock_flaky_agent(task: Task, env) -> Transcript:
             Step(step_number=1, is_error=True, tool_calls=[ToolCall(tool_name="update_order", is_error=True)])
         )
     return transcript
+
+
+def test_zero_trust_defense_grader(mock_task, memory_sandbox):
+    """测试零信任防御性验证协议 Grader"""
+    def tdd_probe_assert(task, transcript, env_state):
+        if env_state.get("order_10086_status") != "shipped":
+            return False, "TDD 探针防御失败: 数据库物理记录未更新为 shipped"
+        return True, "TDD 探针物理验证通过"
+
+    grader = ZeroTrustGrader(tdd_assert_fn=tdd_probe_assert)
+    evaluator = AgentEvaluator(grader=grader, env=memory_sandbox)
+
+    # 1. 成功案例
+    trial1 = evaluator.run_trial(mock_task, mock_successful_agent)
+    assert trial1.passed is True
+    assert "[ZeroTrustVerified]" in trial1.reasons[0]
+
+    # 2. 假设 Agent 生成了完美的自述 Markdown 报告，但数据库实际未改
+    def agent_claiming_success_without_db_change(task, env):
+        t = Transcript()
+        t.steps.append(Step(step_number=1, thought="我已经在 Markdown 报告中宣称完成了任务！"))
+        return t
+
+    trial2 = evaluator.run_trial(mock_task, agent_claiming_success_without_db_change)
+    assert trial2.passed is False
+    assert "[ZeroTrustReject]" in trial2.reasons[0]
 
 
 def test_composite_grader_and_evaluator(mock_task, memory_sandbox):
@@ -101,7 +125,7 @@ def test_step_efficiency_loop_detection(mock_task, memory_sandbox):
     """测试死循环（重复调用相同工具参数）检测能力"""
     def looping_agent(task, env):
         transcript = Transcript()
-        for i in range(4):  # 连续重复调用 4 次
+        for i in range(4):
             transcript.steps.append(
                 Step(step_number=i+1, tool_calls=[ToolCall(tool_name="retry_api", arguments={"param": "1"})])
             )

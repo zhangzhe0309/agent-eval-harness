@@ -1,4 +1,4 @@
-# Agent 自动化评测指南（上篇）：从传统测开转型、环境硬断言与 Pass^k 架构实战
+# Agent 自动化评测指南（上篇）：从传统测开转型、零信任防御协议与 Pass^k 架构实战
 
 ---
 
@@ -49,74 +49,69 @@
 
 ---
 
-## 三、 为什么传统测试方法失效？对应代码与算法解法
+## 三、 零信任多 Agent 协作哲学与防御性验证协议 (Zero-Trust Protocol)
 
-正因为 Agent 系统存在上述四大固有失效模式，传统接口测试（Postman/pytest 接口断言）与 UI 测试（Playwright DOM 校验）才会在 Agent 测试中全面失效。
-
-针对 Agent 的固有缺陷，`agent-eval-harness` 引入了**多维组合判定器 (CompositeGrader) 与 $Pass^k$ 统计算法**：
+针对上述四大失效模式，业界顶尖团队（如 Anthropic、Inspect、Zero-Trust Protocol）总结出核心防御哲学：
 
 ```
-【失效模式一 & 失效模式三】 ──────> 【解法一：物理环境终态校验 (StateGrader) + 工具链参数断言 (ToolCorrectnessGrader)】
-【失效模式二 & 失效模式四】 ──────> 【解法二：步骤效率/死循环阻断 (StepEfficiencyGrader) + Pass^k 可靠性模型】
+[拒绝盲信 Agent 自述] ──> [TDD 测试驱动预定义边界] ──> [独立沙箱探针硬校验] ──> [牺牲 3-10x Token 换绝对可靠]
 ```
+
+### 1. 拒绝盲信 Agent 自述报告 (Refuse Blind Trust in Self-Report)
+- **核心准则**：任何被测 Agent 输出的 Markdown 报告、自然语言总结（如“我已经成功修复了该 Bug”）一律视作**未验证凭证（Untrusted Claim）**。绝不能根据 Agent 的口头汇报判定测试通过。
+
+### 2. 测试驱动（TDD）预先定义边界 (TDD Boundary Specification)
+- **核心准则**：在被测 Agent 启动前，测试团队或 Orchestrator 必须先编写好独立的可执行单测与边界契约（Input/Output Schemas、SQL/API 状态探针）。要求 Agent 以“使独立单测 PASS”为唯一目标。
+
+### 3. 强制独立测试关卡 (Mandatory Independent Verification Gates)
+- **核心准则**：测试探针与沙箱环境必须与被测 Agent 完全解耦。测试关卡独立连入数据库/文件系统进行物理校验，拒绝“Agent 自调工具、自查数据、自评通过”的包饺子假象。
+
+### 4. 3-10 倍 Token 交换法则 (Token Trade-off for Reliability)
+- **核心准则**：为了达到生产级高可靠性，主动接受**消耗 3-10 倍 Token** 的代价（用于多轮 Trial 独立抽样、多模型交叉审计、独立探针校验与轨迹比对）。
+- **终极目标**：宁可输出明确的失败报告 (Explicit Failure Report)，也绝不容忍模糊带病过关！
 
 ---
 
-## 四、 解法一：多维判定体系 (Grader Matrix) 与沙箱隔离
+## 四、 框架解法：多维判定体系 (Grader Matrix) 与沙箱隔离
 
-为了解决**失效模式一（幻觉欺骗）**与**失效模式三（副作用破坏）**，评测框架提供了四大断言组件：
+`agent-eval-harness` 提供了支持零信任协议的四大断言组件：
 
-1. **状态断言 (StateGrader)**：测试探针连入物理存储（数据库/文件），校验数据变更与副作用隔离。
-2. **工具正确性断言 (ToolCorrectnessGrader)**：校验 Agent 调用的工具序列是否包含必需工具，且参数 JSON 格式与逻辑正确。
-3. **效率与死循环断言 (StepEfficiencyGrader)**：校验总步数是否超出上限，自动识别连续重复调用的死循环逻辑。
-4. **组合判定器 (CompositeGrader)**：支持多维度 Grader 加权融合打分（如 50% 物理状态 + 30% 工具正确性 + 20% 步骤效率）。
-
-### 沙箱隔离机制 (Sandbox Lifecycle)
-每次测试运行在独立的沙箱中：
-- **Setup 阶段**：测试前回滚 DB 事务、重置 Mock 状态，确保干净起跑线。
-- **Teardown 阶段**：测试后强制销毁垃圾数据与连接，防止用例污染。
+1. **零信任防御判定器 (ZeroTrustGrader)**：强制执行独立的 TDD 物理探针校验，拦截任何未经过验证的口头自述。
+2. **状态断言 (StateGrader)**：测试探针连入物理存储（数据库/文件），校验数据变更与副作用隔离。
+3. **工具正确性断言 (ToolCorrectnessGrader)**：校验 Agent 调用的工具序列是否包含必需工具，且参数 JSON 格式与逻辑正确。
+4. **步骤效率与死循环断言 (StepEfficiencyGrader)**：校验总步数是否超出上限，自动识别连续重复调用的死循环逻辑。
+5. **组合判定器 (CompositeGrader)**：支持多维度 Grader 加权融合打分（如 50% 零信任物理状态 + 30% 工具正确性 + 20% 步骤效率）。
 
 ---
 
-## 五、 解法二：$Pass^k$ 数学算法与 CI/CD 门禁
+## 五、 $Pass^k$ 数学算法与 CI/CD 门禁
 
-为了解决**失效模式二（过程弯弯绕）**与**失效模式四（概率成功假象）**，我们必须引入 $Pass^k$ 统计学模型。
-
-### 1. $Pass^k$ 算法数学原理
-
-单次测试通过没有意义。在独立沙箱中将同一个任务连续运行 $k$ 次 Trial，只有当 $k$ 次试验**全部成功**时，$Pass^k$ 才判定为 `True`：
+为了解决非确定性与概率成功假象，框架引入 $Pass^k$ 统计学模型：
 
 $$Pass^k = \prod_{i=1}^{k} \mathbb{I}(\text{Trial}_i = \text{SUCCESS})$$
 
-- 若单次成功率为 $70\%$，在 $k=5$ 时：
+- 若单次成功率为 $70\%$，在独立沙箱中进行 $k=5$ 轮评估：
   $$Pass^5 = 0.7^5 \approx 16.8\%$$
-  真实的系统不稳定风险会被指数级放大并暴露出来！
+  牺牲多轮 Token 开销，将系统潜在不稳定风险暴露无遗。
 
-### 2. CI/CD 四级 Ship Gate 发布门禁
+### CI/CD 四级 Ship Gate 发布门禁
 
 ```
 [PR 提交] ─> [L1 Syntax Gate] ─> [L2 Sanity Gate] ─> [L3 Reliability Pass^5 Gate] ─> [L4 Efficiency Gate] ─> [发布]
 ```
 
-1. **L1 Syntax Gate**：静态校验 Prompt 模板与 Tool JSON Schema 定义。
-2. **L2 Sanity Gate**：20 个核心 Task 单次冒烟（$k=1$）。
-3. **L3 Reliability Gate**：100+ Task 集合独立运行 $k=5$ 轮，要求总体 $Pass^5 > 85\%$。
-4. **L4 Efficiency Gate**：校验平均步数与工具报错率，拦截耗时死循环退化。
-
 ---
 
 ## 六、 工业级 Python 评测代码实战
 
-`agent-eval-harness` 框架如何通过组合判定器与沙箱进行测试：
-
 ```python
 from agent_eval import (
-    Task, SandboxEnvironment, CompositeGrader, StateGrader,
-    ToolCorrectnessGrader, StepEfficiencyGrader, AgentEvaluator,
+    Task, SandboxEnvironment, CompositeGrader, ZeroTrustGrader,
+    StateGrader, ToolCorrectnessGrader, StepEfficiencyGrader, AgentEvaluator,
     Step, ToolCall, Transcript
 )
 
-# 1. 定义测试 Task
+# 1. 定义测试 Task (针对零信任发货场景)
 task = Task(
     id="task_order_ship",
     name="订单发货处理",
@@ -126,7 +121,7 @@ task = Task(
     max_allowed_steps=5
 )
 
-# 2. 配置测试沙箱
+# 2. 配置独立测试沙箱
 db_mock = {}
 def setup_env():
     db_mock.clear()
@@ -136,20 +131,27 @@ def setup_env():
 
 sandbox = SandboxEnvironment(setup_fn=setup_env, get_state_fn=lambda: dict(db_mock))
 
-# 3. 构造 CompositeGrader 加权组合断言
+# 3. 定义 TDD 零信任物理探针
+def tdd_probe_assert(task, transcript, env_state):
+    if env_state.get("order_10086_status") != "shipped":
+        return False, "TDD 探针失败: 数据库订单状态未更改为 shipped"
+    if env_state.get("email_sent") is not True:
+        return False, "TDD 探针失败: 确认邮件未发出"
+    return True, "物理环境探针全量校验通过"
+
+# 4. 构造 CompositeGrader 零信任防御组合断言
 composite_grader = CompositeGrader(
     graders=[
-        (StateGrader(), 0.5),                                                         # 50% 权重：物理状态断言
-        (ToolCorrectnessGrader(expected_tools=["query_order", "update_order"]), 0.3),  # 30% 权重：工具序列与参数断言
-        (StepEfficiencyGrader(max_steps=5), 0.2)                                      # 20% 权重：步骤效率与死循环熔断
+        (ZeroTrustGrader(tdd_assert_fn=tdd_probe_assert), 0.5),                        # 50% 零信任探针
+        (ToolCorrectnessGrader(expected_tools=["query_order", "update_order"]), 0.3),  # 30% 工具正确性
+        (StepEfficiencyGrader(max_steps=5), 0.2)                                      # 20% 步骤效率
     ]
 )
 
-# 4. 执行 Pass^5 可靠性统计评估
+# 5. 执行 Pass^5 独立多轮评估
 evaluator = AgentEvaluator(grader=composite_grader, env=sandbox)
 summary = evaluator.evaluate_task(task, my_agent_runner, k=5)
 
-print(f"Task ID: {summary.task_id}")
 print(f"Pass^5 全成功率: {summary.pass_all}")
 print(f"单次平均成功率: {summary.success_rate * 100}%")
 print(f"综合平均得分: {summary.avg_score}")
