@@ -1,6 +1,5 @@
 # Agent 自动化评测指南（下篇）：执行轨迹（Transcript）解析、LLM Judge 数学校准与生产飞轮
 
-> **作者**：张喆 (Zhang Zhe) | 资深 QA 自动化架构师 & AI Agent 评测专家  
 > **开源项目**：[agent-eval-harness](https://github.com/zhangzhe0309/agent-eval-harness)
 
 ---
@@ -9,7 +8,7 @@
 
 在 Agent 测试实践中，初学者最常犯的严重错误是：**“只要最终环境数据库字段对了，或者断言通过了，就认为测试 100% 成功”**。
 
-这种黑盒测试���维会导致严重的隐蔽风险遗漏：
+这种黑盒测试思维会导致严重的隐蔽风险遗漏：
 
 1. **Reward Hacking 与侥幸蒙对**：
    Agent 遇到接口报错后，可能会尝试调用不合规的绕路工具，或者通过硬编码假数据恰好覆盖了校验规则。表面上 Outcome 为 `PASS`，实则是严重的业务漏洞。
