@@ -103,8 +103,9 @@
 - **Cohen's Kappa 系数数学校验**：
   使用统计学公式计算人类与 LLM Judge 的一致性得分：
   $$K = \frac{p_o - p_e}{1 - p_e}$$
-  - $p_o$ 为人类专家与 LLM Judge 的观察一致率。
-  - **解决的问题**：只有当 $K \ge 0.75$（强一致）时，才证明 LLM 裁判具备人审替代能力，彻底消除打分随心所欲的患害。
+  - $p_o$ 为人类专家与 LLM Judge 的观察一致率（Observed Agreement）。
+  - $p_e$ 为随机一致概率（Chance Agreement）：$p_e = p_{\text{human\_pass}} \cdot p_{\text{judge\_pass}} + p_{\text{human\_fail}} \cdot p_{\text{judge\_fail}}$。
+  - **解���的问题**：扣除模型因好好先生偏见（Positive Bias）导致的随机碰巧一致。只有当 $K \ge 0.75$（强一致）时，才证明 LLM 裁判具备人审替代能力，彻底消除打分随心所欲的患害。
 
 ---
 

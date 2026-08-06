@@ -58,7 +58,7 @@
 ```
 
 ### 1. 拒绝盲信 Agent 自述报告 (Refuse Blind Trust in Self-Report)
-- **核心准则**：任何被测 Agent 输出的 Markdown 报告、自然语言总结（如“我已经成功修复了该 Bug”）一律视作**未验证凭证（Untrusted Claim）**。绝不能根据 Agent 的口头汇报判定测试通过。
+- **核心准则**：被测 Agent 的文本输出（含 Markdown 报告与 JSON 自述）在物理探针面前均具备“**自证假象**”属性。零信任协议强制将 Agent 汇报降级为待核查假说 (Unverified Hypothesis)，绝不能根据 Agent 的口头汇报判定测试通过，唯有独立的物理沙箱探针通过确定性断言后方可提权为 PASS。
 
 ### 2. 测试驱动（TDD）预先定义边界 (TDD Boundary Specification)
 - **核心准则**：在被测 Agent 启动前，测试团队或 Orchestrator 必须先编写好独立的可执行单测与边界契约（Input/Output Schemas、SQL/API 状态探针）。要求 Agent 以“使独立单测 PASS”为唯一目标。
