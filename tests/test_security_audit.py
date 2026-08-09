@@ -62,27 +62,15 @@ class TestRegexInjection:
 
 class TestZeroTrustBypass:
     """Test ZeroTrustGrader cannot be silently skipped."""
-    
+
     def test_pipeline_without_zero_trust_should_fail(self):
-        """Pipeline should not pass when ZeroTrustGrader is missing."""
-        # Current behavior: passes with "Skipped ZeroTrustGrader"
-        # Expected behavior: should fail or require ZeroTrustGrader
-        pipeline = LifecycleQualityGatePipeline(
-            zero_trust_grader=None,  # Explicitly skip
-            anti_rationalization_grader=AntiRationalizationGrader(),
-        )
-        
-        task = Task(id="test", name="test", prompt="test")
-        transcript = Transcript(steps=[
-            Step(step_number=1, thought="test", observation="")
-        ])
-        
-        result = pipeline.run_pipeline(task, transcript, {})
-        
-        # Current code: this passes (SECURITY BUG)
-        # Fixed code: this should fail
-        assert result.all_passed == False, \
-            "Pipeline should fail when ZeroTrustGrader is not configured"
+        """Pipeline should raise error when ZeroTrustGrader is missing."""
+        # ZeroTrustGrader is now mandatory
+        with pytest.raises(ValueError, match="ZeroTrustGrader is mandatory"):
+            LifecycleQualityGatePipeline(
+                zero_trust_grader=None,  # Explicitly skip - should raise
+                anti_rationalization_grader=AntiRationalizationGrader(),
+            )
 
 
 class TestExceptionHandler:
@@ -121,23 +109,15 @@ class TestInputSanitization:
 
 class TestLifecyclePipeline:
     """Test lifecycle pipeline security."""
-    
+
     def test_all_graders_must_be_configured(self):
-        """Pipeline should require all critical graders."""
-        # Test that pipeline fails gracefully when required graders are missing
-        pipeline = LifecycleQualityGatePipeline(
-            zero_trust_grader=None,
-            state_grader=None,
-        )
-        
-        task = Task(id="test", name="test", prompt="test")
-        transcript = Transcript(steps=[
-            Step(step_number=1, thought="test", observation="test")
-        ])
-        
-        # This should not crash
-        result = pipeline.run_pipeline(task, transcript, {})
-        assert result is not None
+        """Pipeline should require ZeroTrustGrader to be configured."""
+        # ZeroTrustGrader is now mandatory, should raise error
+        with pytest.raises(ValueError, match="ZeroTrustGrader is mandatory"):
+            LifecycleQualityGatePipeline(
+                zero_trust_grader=None,
+                state_grader=None,
+            )
 
 
 if __name__ == "__main__":

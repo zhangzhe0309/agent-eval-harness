@@ -2,8 +2,10 @@ import random
 from agent_eval.dataset import BenchmarkDataset
 from agent_eval.evaluator import AgentEvaluator
 from agent_eval.graders import (
+    AntiRationalizationGrader,
     CodeGrader,
     CompositeGrader,
+    LifecycleQualityGatePipeline,
     StateGrader,
     StepEfficiencyGrader,
     ToolCorrectnessGrader,
@@ -18,7 +20,7 @@ def mock_successful_agent(task: Task, env) -> Transcript:
     transcript.steps.append(
         Step(
             step_number=1,
-            thought="需要先查询���单 10086 的当前状态",
+            thought="需要先查询订单 10086 的当前状态",
             tool_calls=[ToolCall(tool_name="query_order", arguments={"order_id": "10086"}, output={"status": "pending"})],
             observation={"status": "pending"},
         )
@@ -153,32 +155,38 @@ def test_benchmark_dataset_loader(tmp_path):
 
 
 def test_anti_rationalization_grader():
-    from agent_eval.graders import AntiRationalizationGrader
-    from agent_eval.models import Step, Task, ToolCall, Transcript
-
+    """Test AntiRationalizationGrader with 3-factor composite check."""
     grader = AntiRationalizationGrader()
     task = Task(id="test", name="test", prompt="test")
 
-    # 1. 产生辩解的 Transcript
+    # 1. All 3 factors present: physical failure + interrupted chain + unfounded claim
     bad_transcript = Transcript()
     bad_transcript.steps.append(
         Step(
             step_number=1,
-            thought="The error is expected and acceptable, so no need to fix it.",
-            tool_calls=[ToolCall(tool_name="test_tool", arguments={})],
+            thought="Task completed successfully despite errors",
+            tool_calls=[ToolCall(tool_name="test_tool", is_error=True)],
+            observation="error occurred"
         )
     )
-    res_bad = grader.evaluate(task, bad_transcript, {})
+    res_bad = grader.evaluate(task, bad_transcript, {"result": "fail"})  # physical failure
     assert res_bad.passed is False
-    assert "Detected self-justification" in res_bad.reason
+    assert "Multi-factor detection" in res_bad.reason or "interrupted" in res_bad.reason.lower()
 
-    # 2. 无工具调用的 Transcript (伪造成功)
+    # 2. Zero tool calls but claiming success (interrupted chain)
     empty_transcript = Transcript()
+    empty_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="Task completed successfully",
+            tool_calls=[],
+        )
+    )
     res_empty = grader.evaluate(task, empty_transcript, {})
     assert res_empty.passed is False
-    assert "zero tool calls" in res_empty.reason
+    assert "zero tool calls" in res_empty.reason.lower() or "interrupted" in res_empty.reason.lower()
 
-    # 3. 正常 Transcript
+    # 3. Normal transcript with successful tool calls
     good_transcript = Transcript()
     good_transcript.steps.append(
         Step(
@@ -192,15 +200,53 @@ def test_anti_rationalization_grader():
     assert res_good.passed is True
 
 
-def test_lifecycle_quality_gate_pipeline(mock_task, memory_sandbox):
-    from agent_eval.graders import (
-        AntiRationalizationGrader,
-        LifecycleQualityGatePipeline,
-        StateGrader,
-        ZeroTrustGrader,
-    )
-    from agent_eval.models import Step, Task, ToolCall, Transcript
+def test_anti_rationalization_decoupling_with_physical_verification():
+    """测试物理断言优先与解耦机制（防止过度防御误杀正当用例）"""
+    grader = AntiRationalizationGrader()
+    task = Task(id="test", name="test", prompt="test")
 
+    # 物理验证通过 + 有工具调用 + 无成功声明 → 应该通过
+    excuse_transcript = Transcript()
+    excuse_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="The error is expected in this dry run.",
+            tool_calls=[ToolCall(tool_name="dry_run", arguments={})],
+        )
+    )
+
+    # 物理断言通过（env_state matches expected_state）
+    res_decoupled = grader.evaluate(task, excuse_transcript, {"result": "success"})
+    assert res_decoupled.passed is True
+    # 应该返回全分，因为没有物理失败
+    assert res_decoupled.score == 1.0
+    assert "No anti-rationalization" in res_decoupled.reason
+
+
+def test_anti_rationalization_allow_expected_errors():
+    """测试负向/异常测试用例不触发误杀拦截"""
+    grader = AntiRationalizationGrader()
+    # 预期错误场景：物理失败 + 工具错误 + 无成功声明
+    task = Task(id="test", name="test", prompt="test")
+
+    negative_test_transcript = Transcript()
+    negative_test_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="The error is expected when testing 404 response.",
+            tool_calls=[ToolCall(tool_name="test_api", is_error=True, arguments={})],
+        )
+    )
+
+    # 物理失败 + 工具错误，但没有成功声明 → 只匹配2个因子，返回警告
+    res = grader.evaluate(task, negative_test_transcript, {"result": "fail"})
+    # 只匹配2个因子（physical_failure + interrupted_chain），应该返回警告而非硬失败
+    assert res.passed is True
+    assert res.score < 1.0, "Should have reduced score for partial match"
+    assert "Partial match" in res.reason
+
+
+def test_lifecycle_quality_gate_pipeline(mock_task, memory_sandbox):
     def tdd_probe_assert(task, transcript, env_state):
         if env_state.get("order_10086_status") != "shipped":
             return False, "Database state not updated"
@@ -214,7 +260,6 @@ def test_lifecycle_quality_gate_pipeline(mock_task, memory_sandbox):
 
     # 1. 成功全流程
     memory_sandbox.setup()
-    # 模拟 Agent 更新了底层 DB 状态
     state = memory_sandbox.get_state()
     state["order_10086_status"] = "shipped"
     state["email_sent"] = True
@@ -239,4 +284,3 @@ def test_lifecycle_quality_gate_pipeline(mock_task, memory_sandbox):
     failed_gate_res = pipeline.run_pipeline(mock_task, good_transcript, memory_sandbox.get_state())
     assert failed_gate_res.all_passed is False
     assert "BLOCKED" in failed_gate_res.summary
-
