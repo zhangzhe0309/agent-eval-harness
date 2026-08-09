@@ -150,3 +150,93 @@ def test_benchmark_dataset_loader(tmp_path):
     assert len(dataset) == 1
     assert dataset[0].id == "t1"
     assert len(dataset.filter_by_metadata("category", "devops")) == 1
+
+
+def test_anti_rationalization_grader():
+    from agent_eval.graders import AntiRationalizationGrader
+    from agent_eval.models import Step, Task, ToolCall, Transcript
+
+    grader = AntiRationalizationGrader()
+    task = Task(id="test", name="test", prompt="test")
+
+    # 1. 产生辩解的 Transcript
+    bad_transcript = Transcript()
+    bad_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="The error is expected and acceptable, so no need to fix it.",
+            tool_calls=[ToolCall(tool_name="test_tool", arguments={})],
+        )
+    )
+    res_bad = grader.evaluate(task, bad_transcript, {})
+    assert res_bad.passed is False
+    assert "Detected self-justification" in res_bad.reason
+
+    # 2. 无工具调用的 Transcript (伪造成功)
+    empty_transcript = Transcript()
+    res_empty = grader.evaluate(task, empty_transcript, {})
+    assert res_empty.passed is False
+    assert "zero tool calls" in res_empty.reason
+
+    # 3. 正常 Transcript
+    good_transcript = Transcript()
+    good_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="Executing database check",
+            tool_calls=[ToolCall(tool_name="db_check", arguments={})],
+            observation={"result": "ok"},
+        )
+    )
+    res_good = grader.evaluate(task, good_transcript, {})
+    assert res_good.passed is True
+
+
+def test_lifecycle_quality_gate_pipeline(mock_task, memory_sandbox):
+    from agent_eval.graders import (
+        AntiRationalizationGrader,
+        LifecycleQualityGatePipeline,
+        StateGrader,
+        ZeroTrustGrader,
+    )
+    from agent_eval.models import Step, Task, ToolCall, Transcript
+
+    def tdd_probe_assert(task, transcript, env_state):
+        if env_state.get("order_10086_status") != "shipped":
+            return False, "Database state not updated"
+        return True, "Verified"
+
+    pipeline = LifecycleQualityGatePipeline(
+        zero_trust_grader=ZeroTrustGrader(tdd_assert_fn=tdd_probe_assert),
+        state_grader=StateGrader(expected_state={"order_10086_status": "shipped"}),
+        anti_rationalization_grader=AntiRationalizationGrader(),
+    )
+
+    # 1. 成功全流程
+    memory_sandbox.setup()
+    # 模拟 Agent 更新了底层 DB 状态
+    state = memory_sandbox.get_state()
+    state["order_10086_status"] = "shipped"
+    state["email_sent"] = True
+    memory_sandbox.get_state_fn = lambda: state
+
+    good_transcript = Transcript()
+    good_transcript.steps.append(
+        Step(
+            step_number=1,
+            thought="Updating order status and sending email",
+            tool_calls=[ToolCall(tool_name="update_order", arguments={"id": "10086"})],
+        )
+    )
+    gate_res = pipeline.run_pipeline(mock_task, good_transcript, memory_sandbox.get_state())
+    assert gate_res.all_passed is True
+    assert "READY TO SHIP" in gate_res.summary
+
+    # 2. 在 BUILD_VERIFY 阶段卡住的失败案例
+    state_pending = dict(state)
+    state_pending["order_10086_status"] = "pending"
+    memory_sandbox.get_state_fn = lambda: state_pending
+    failed_gate_res = pipeline.run_pipeline(mock_task, good_transcript, memory_sandbox.get_state())
+    assert failed_gate_res.all_passed is False
+    assert "BLOCKED" in failed_gate_res.summary
+

@@ -2,11 +2,15 @@ from agent_eval.dataset import BenchmarkDataset
 from agent_eval.environment import SandboxEnvironment
 from agent_eval.evaluator import AgentEvaluator
 from agent_eval.graders import (
+    AntiRationalizationGrader,
     BaseGrader,
     CodeGrader,
     CompositeGrader,
     GraderResult,
     LLMJudgeGrader,
+    LifecycleGateResult,
+    LifecycleQualityGatePipeline,
+    LifecycleStageResult,
     StateGrader,
     StepEfficiencyGrader,
     ToolCorrectnessGrader,
@@ -30,6 +34,10 @@ __all__ = [
     "StepEfficiencyGrader",
     "LLMJudgeGrader",
     "CompositeGrader",
+    "AntiRationalizationGrader",
+    "LifecycleStageResult",
+    "LifecycleGateResult",
+    "LifecycleQualityGatePipeline",
     "SandboxEnvironment",
     "AgentEvaluator",
     "BenchmarkDataset",

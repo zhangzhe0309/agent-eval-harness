@@ -35,8 +35,17 @@ class ZeroTrustGrader(BaseGrader):
         self.strict_reject_text_claims = strict_reject_text_claims
 
     def evaluate(self, task: Task, transcript: Transcript, env_state: Any) -> GraderResult:
-        # 1. 独立运行 TDD 断言探针 (物理校验)
-        passed, reason = self.tdd_assert_fn(task, transcript, env_state)
+        # 1. 独立运行 TDD ��言探针 (物理校验)
+        try:
+            passed, reason = self.tdd_assert_fn(task, transcript, env_state)
+        except Exception as e:
+            return GraderResult(
+                passed=False,
+                score=0.0,
+                reason=f"[ZeroTrustReject] Probe exception raised: {type(e).__name__}: {e}",
+                name="ZeroTrustGrader",
+                is_trusted=True,
+            )
 
         if not passed:
             # 零信任协议：任何物理探针失败，立刻返回明确的拒绝报告
@@ -180,3 +189,156 @@ class CompositeGrader(BaseGrader):
 
         final_score = round(weighted_score, 4)
         return GraderResult(passed=all_passed, score=final_score, reason=" | ".join(reasons), name="CompositeGrader")
+
+
+class AntiRationalizationGrader(BaseGrader):
+    """
+    反合理化判定器 (Anti-Rationalization Grader)：
+    拦截 Agent 在 Transcript 中自圆其说、掩盖错误或在未运行工具时擅自声明成功的行为。
+    """
+
+    DEFAULT_RATIONALIZATION_PATTERNS = [
+        r"(?:this|the) error is (?:expected|acceptable|minor|normal)",
+        r"(?:skip|ignoring) (?:this|the) (?:test|failure|error)",
+        r"no need to (?:fix|address|worry)",
+        r"(?:functioning|working) as intended despite",
+        r"视为成功",
+        r"忽略此报错",
+        r"无需修复",
+        r"符合预期报错",
+    ]
+
+    def __init__(
+        self,
+        custom_patterns: Optional[List[str]] = None,
+        require_tool_calls_for_success: bool = True,
+    ):
+        self.patterns = self.DEFAULT_RATIONALIZATION_PATTERNS + (custom_patterns or [])
+        self.require_tool_calls_for_success = require_tool_calls_for_success
+
+    def evaluate(self, task: Task, transcript: Transcript, env_state: Any) -> GraderResult:
+        import re
+
+        if self.require_tool_calls_for_success and len(transcript.all_tool_calls) == 0:
+            return GraderResult(
+                passed=False,
+                score=0.0,
+                reason="[AntiRationalization] Agent produced zero tool calls but claimed completion",
+                name="AntiRationalizationGrader",
+                is_trusted=True,
+            )
+
+        found_excuses = []
+        for step in transcript.steps:
+            text_to_check = f"{step.thought} {step.observation}"
+            for pattern in self.patterns:
+                try:
+                    if re.search(pattern, text_to_check, re.IGNORECASE):
+                        found_excuses.append(f"Step {step.step_number}: matched '{pattern}'")
+                except re.error:
+                    # Skip invalid or unsafe regex pattern
+                    continue
+
+        if found_excuses:
+            return GraderResult(
+                passed=False,
+                score=0.0,
+                reason=f"[AntiRationalization] Detected self-justification/excuses: {'; '.join(found_excuses)}",
+                name="AntiRationalizationGrader",
+                is_trusted=True,
+            )
+
+        return GraderResult(
+            passed=True,
+            score=1.0,
+            reason="[AntiRationalization] No anti-rationalization or unverified claims detected",
+            name="AntiRationalizationGrader",
+            is_trusted=True,
+        )
+
+
+class LifecycleStageResult(BaseModel):
+    stage_name: str
+    passed: bool
+    details: str
+
+
+class LifecycleGateResult(BaseModel):
+    all_passed: bool
+    stages: List[LifecycleStageResult]
+    summary: str
+
+
+class LifecycleQualityGatePipeline:
+    """
+    全生命周期质量门禁 (DEFINE -> PLAN -> BUILD -> VERIFY -> REVIEW -> SHIP)
+    为 Agent 交付提供阶段式强制拦截卡点。
+    """
+
+    def __init__(
+        self,
+        zero_trust_grader: Optional[ZeroTrustGrader] = None,
+        state_grader: Optional[StateGrader] = None,
+        efficiency_grader: Optional[StepEfficiencyGrader] = None,
+        anti_rationalization_grader: Optional[AntiRationalizationGrader] = None,
+    ):
+        self.zero_trust_grader = zero_trust_grader
+        self.state_grader = state_grader
+        self.efficiency_grader = efficiency_grader or StepEfficiencyGrader(max_steps=10)
+        self.anti_rationalization_grader = anti_rationalization_grader or AntiRationalizationGrader()
+
+    def run_pipeline(self, task: Task, transcript: Transcript, env_state: Any) -> LifecycleGateResult:
+        stages: List[LifecycleStageResult] = []
+
+        # Stage 1: DEFINE & PLAN (Tool / Step Efficiency Check)
+        eff_res = self.efficiency_grader.evaluate(task, transcript, env_state)
+        stages.append(
+            LifecycleStageResult(
+                stage_name="DEFINE_PLAN",
+                passed=eff_res.passed,
+                details=eff_res.reason,
+            )
+        )
+
+        # Stage 2: BUILD & VERIFY (Zero-Trust Physical Probe)
+        if self.zero_trust_grader:
+            zt_res = self.zero_trust_grader.evaluate(task, transcript, env_state)
+            stages.append(
+                LifecycleStageResult(
+                    stage_name="BUILD_VERIFY",
+                    passed=zt_res.passed,
+                    details=zt_res.reason,
+                )
+            )
+        else:
+            stages.append(
+                LifecycleStageResult(
+                    stage_name="BUILD_VERIFY",
+                    passed=True,
+                    details="Skipped ZeroTrustGrader (not configured)",
+                )
+            )
+
+        # Stage 3: REVIEW & SHIP (Anti-Rationalization + Final State Check)
+        ar_res = self.anti_rationalization_grader.evaluate(task, transcript, env_state)
+        state_pass = True
+        state_details = "State check skipped"
+        if self.state_grader:
+            st_res = self.state_grader.evaluate(task, transcript, env_state)
+            state_pass = st_res.passed
+            state_details = st_res.reason
+
+        review_passed = ar_res.passed and state_pass
+        stages.append(
+            LifecycleStageResult(
+                stage_name="REVIEW_SHIP",
+                passed=review_passed,
+                details=f"AntiRationalization: {ar_res.reason} | State: {state_details}",
+            )
+        )
+
+        all_passed = all(s.passed for s in stages)
+        summary = "All lifecycle quality gates PASSED [READY TO SHIP]" if all_passed else "Lifecycle quality gates FAILED [BLOCKED]"
+
+        return LifecycleGateResult(all_passed=all_passed, stages=stages, summary=summary)
+
